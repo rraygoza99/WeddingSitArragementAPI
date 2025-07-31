@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34607.119
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WeddingSitArragementAPI", "WeddingSitArragementAPI\WeddingSitArragementAPI.csproj", "{1BB99EB9-520F-4B2A-8400-D669A6182EEE}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1BB99EB9-520F-4B2A-8400-D669A6182EEE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1BB99EB9-520F-4B2A-8400-D669A6182EEE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1BB99EB9-520F-4B2A-8400-D669A6182EEE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1BB99EB9-520F-4B2A-8400-D669A6182EEE}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9BFE90A4-EC6B-4C6C-BD21-CCDAF645BDE0}
+	EndGlobalSection
+EndGlobal
