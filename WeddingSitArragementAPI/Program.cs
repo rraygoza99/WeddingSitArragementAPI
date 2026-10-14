@@ -113,22 +113,14 @@ app.MapPost("/api/s3/upload", async (HttpRequest request, IAmazonS3 s3Client, [F
 
     try
     {
-        // If file already exists, verify caller is owner
-        try
+        // If file already exists, verify caller is in owners list
+        var existingOwners = await GetExistingOwnerEmailsAsync(s3Client, BucketName, file.FileName);
+        if (existingOwners != null && existingOwners.Count > 0 && !IsEmailAuthorized(existingOwners, email))
         {
-            var existingMeta = await s3Client.GetObjectMetadataAsync(BucketName, file.FileName);
-            var existingOwner = GetOwnerEmailFromMetadata(existingMeta.Metadata);
-            if (!string.IsNullOrWhiteSpace(existingOwner) && !string.Equals(existingOwner, email, StringComparison.OrdinalIgnoreCase))
-            {
-                return Results.Problem(
-                    statusCode: StatusCodes.Status403Forbidden,
-                    title: "Forbidden",
-                    detail: "You do not have permission to overwrite this file.");
-            }
-        }
-        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            // File does not exist yet; safe to create
+            return Results.Problem(
+                statusCode: StatusCodes.Status403Forbidden,
+                title: "Forbidden",
+                detail: "You do not have permission to overwrite this file.");
         }
 
         using var stream = file.OpenReadStream();
@@ -165,21 +157,13 @@ app.MapPut("/api/s3/file/{fileName}", async (string fileName, HttpRequest reques
     try
     {
         // If file exists, verify ownership
-        try
+        var existingOwners = await GetExistingOwnerEmailsAsync(s3Client, BucketName, fileName);
+        if (existingOwners != null && existingOwners.Count > 0 && !IsEmailAuthorized(existingOwners, email))
         {
-            var meta = await s3Client.GetObjectMetadataAsync(BucketName, fileName);
-            var fileOwner = GetOwnerEmailFromMetadata(meta.Metadata);
-            if (!string.IsNullOrWhiteSpace(fileOwner) && !string.Equals(fileOwner, email, StringComparison.OrdinalIgnoreCase))
-            {
-                return Results.Problem(
-                    statusCode: StatusCodes.Status403Forbidden,
-                    title: "Forbidden",
-                    detail: "Access denied. You do not have permission to modify this file.");
-            }
-        }
-        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            // File does not exist yet; safe to create
+            return Results.Problem(
+                statusCode: StatusCodes.Status403Forbidden,
+                title: "Forbidden",
+                detail: "Access denied. You do not have permission to modify this file.");
         }
 
         using var memoryStream = new MemoryStream();
@@ -224,24 +208,22 @@ app.MapGet("/api/s3/list", async (HttpContext context, IAmazonS3 s3Client, [From
             .Where(o => o.Key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        // Retrieve metadata for objects to check X-OwnerEmail
+        // Retrieve metadata & tags for objects to check X-OwnerEmail
         var metadataTasks = s3Objects.Select(async o =>
         {
             try
             {
-                var meta = await s3Client.GetObjectMetadataAsync(BucketName, o.Key);
-                var fileOwner = GetOwnerEmailFromMetadata(meta.Metadata);
+                var owners = await GetExistingOwnerEmailsAsync(s3Client, BucketName, o.Key) ?? new List<string>();
                 return new
                 {
                     Object = o,
-                    OwnerEmail = fileOwner,
-                    Matches = !string.IsNullOrWhiteSpace(fileOwner) &&
-                              string.Equals(fileOwner, email, StringComparison.OrdinalIgnoreCase)
+                    OwnerEmails = owners,
+                    Matches = IsEmailAuthorized(owners, email)
                 };
             }
             catch
             {
-                return new { Object = o, OwnerEmail = (string?)null, Matches = false };
+                return new { Object = o, OwnerEmails = new List<string>(), Matches = false };
             }
         });
 
@@ -254,7 +236,7 @@ app.MapGet("/api/s3/list", async (HttpContext context, IAmazonS3 s3Client, [From
                 FileName = r.Object.Key,
                 Size = r.Object.Size,
                 LastModified = r.Object.LastModified,
-                OwnerEmail = r.OwnerEmail
+                OwnerEmails = r.OwnerEmails
             })
             .ToList();
 
@@ -283,8 +265,22 @@ async Task<IResult> GetWeddingFile(string fileName, HttpContext context, IAmazon
         var getRequest = new GetObjectRequest { BucketName = BucketName, Key = fileName };
         var response = await s3Client.GetObjectAsync(getRequest);
 
-        var fileOwner = GetOwnerEmailFromMetadata(response.Metadata);
-        if (!string.IsNullOrWhiteSpace(fileOwner) && !string.Equals(fileOwner, email, StringComparison.OrdinalIgnoreCase))
+        var owners = GetOwnerEmailsFromMetadata(response.Metadata);
+        if (owners.Count == 0)
+        {
+            try
+            {
+                var tagResponse = await s3Client.GetObjectTaggingAsync(new GetObjectTaggingRequest
+                {
+                    BucketName = BucketName,
+                    Key = fileName
+                });
+                owners = GetOwnerEmailsFromTags(tagResponse.Tagging);
+            }
+            catch { }
+        }
+
+        if (owners.Count > 0 && !IsEmailAuthorized(owners, email))
         {
             response.Dispose();
             return Results.Problem(
@@ -326,26 +322,22 @@ app.MapDelete("/api/s3/delete/{fileName}", async (string fileName, HttpContext c
     try
     {
         // Check ownership before deleting
-        try
+        var owners = await GetExistingOwnerEmailsAsync(s3Client, BucketName, fileName);
+        if (owners != null && owners.Count > 0 && !IsEmailAuthorized(owners, email))
         {
-            var meta = await s3Client.GetObjectMetadataAsync(BucketName, fileName);
-            var fileOwner = GetOwnerEmailFromMetadata(meta.Metadata);
-            if (!string.IsNullOrWhiteSpace(fileOwner) && !string.Equals(fileOwner, email, StringComparison.OrdinalIgnoreCase))
-            {
-                return Results.Problem(
-                    statusCode: StatusCodes.Status403Forbidden,
-                    title: "Forbidden",
-                    detail: "Access denied. You are not authorized to delete this file.");
-            }
-        }
-        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            return Results.NotFound($"File '{fileName}' was not found.");
+            return Results.Problem(
+                statusCode: StatusCodes.Status403Forbidden,
+                title: "Forbidden",
+                detail: "Access denied. You are not authorized to delete this file.");
         }
 
         var deleteRequest = new DeleteObjectRequest { BucketName = BucketName, Key = fileName };
         await s3Client.DeleteObjectAsync(deleteRequest);
         return Results.Ok($"Deleted {fileName} from S3.");
+    }
+    catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+    {
+        return Results.NotFound($"File '{fileName}' was not found.");
     }
     catch (Exception ex)
     {
@@ -361,14 +353,58 @@ app.Run();
 static string Sanitize(string name) =>
     string.Concat(name.Where(c => char.IsLetterOrDigit(c) || c == '-')).Trim('-');
 
-static string? GetOwnerEmailFromMetadata(MetadataCollection metadata)
+static async Task<List<string>?> GetExistingOwnerEmailsAsync(IAmazonS3 s3Client, string bucket, string key)
 {
-    if (metadata == null) return null;
-    if (metadata["x-owneremail"] is { Length: > 0 } v1) return v1;
-    if (metadata["X-OwnerEmail"] is { Length: > 0 } v2) return v2;
-    if (metadata["x-owner-email"] is { Length: > 0 } v3) return v3;
-    if (metadata["owneremail"] is { Length: > 0 } v4) return v4;
-    if (metadata["owner-email"] is { Length: > 0 } v5) return v5;
+    try
+    {
+        var meta = await s3Client.GetObjectMetadataAsync(bucket, key);
+        var owners = GetOwnerEmailsFromMetadata(meta.Metadata);
+
+        if (owners.Count == 0)
+        {
+            try
+            {
+                var tagResponse = await s3Client.GetObjectTaggingAsync(new GetObjectTaggingRequest
+                {
+                    BucketName = bucket,
+                    Key = key
+                });
+                owners = GetOwnerEmailsFromTags(tagResponse.Tagging);
+            }
+            catch { }
+        }
+
+        return owners;
+    }
+    catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+    {
+        return null; // Object does not exist
+    }
+}
+
+static List<string> ParseEmailList(string? rawValue)
+{
+    if (string.IsNullOrWhiteSpace(rawValue))
+        return new List<string>();
+
+    return rawValue
+        .Split(new[] { ',', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+        .Select(e => e.Trim())
+        .Where(e => !string.IsNullOrEmpty(e))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
+static List<string> GetOwnerEmailsFromMetadata(MetadataCollection metadata)
+{
+    if (metadata == null) return new List<string>();
+
+    var candidates = new[] { "x-owneremail", "X-OwnerEmail", "x-owner-email", "owneremail", "owner-email" };
+    foreach (var key in candidates)
+    {
+        if (metadata[key] is { Length: > 0 } val)
+            return ParseEmailList(val);
+    }
 
     foreach (var key in metadata.Keys)
     {
@@ -377,10 +413,32 @@ static string? GetOwnerEmailFromMetadata(MetadataCollection metadata)
             key.Equals("owneremail", StringComparison.OrdinalIgnoreCase) ||
             key.Equals("owner-email", StringComparison.OrdinalIgnoreCase))
         {
-            return metadata[key];
+            return ParseEmailList(metadata[key]);
         }
     }
-    return null;
+    return new List<string>();
+}
+
+static List<string> GetOwnerEmailsFromTags(List<Tag>? tags)
+{
+    if (tags == null) return new List<string>();
+
+    foreach (var tag in tags)
+    {
+        if (tag.Key.Equals("X-OwnerEmail", StringComparison.OrdinalIgnoreCase) ||
+            tag.Key.Equals("OwnerEmail", StringComparison.OrdinalIgnoreCase) ||
+            tag.Key.Equals("owner-email", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseEmailList(tag.Value);
+        }
+    }
+    return new List<string>();
+}
+
+static bool IsEmailAuthorized(IEnumerable<string> authorizedEmails, string requesterEmail)
+{
+    if (string.IsNullOrWhiteSpace(requesterEmail)) return false;
+    return authorizedEmails.Any(e => string.Equals(e, requesterEmail.Trim(), StringComparison.OrdinalIgnoreCase));
 }
 
 static string? ExtractOwnerEmail(HttpContext context, string? queryOwnerEmail = null)
